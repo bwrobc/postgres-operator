@@ -138,6 +138,42 @@ var PostgresCRDResourceValidation = apiextv1.CustomResourceValidation{
 				Type:     "object",
 				Required: []string{"numberOfInstances", "teamId", "postgresql", "volume"},
 				Properties: map[string]apiextv1.JSONSchemaProps{
+					"additionalVolumeClaimTemplates": {
+						Type: "array",
+						Items: &apiextv1.JSONSchemaPropsOrArray{
+							Schema: &apiextv1.JSONSchemaProps{
+								Type:     "object",
+								Required: []string{"size", "name", "mountPath"},
+								Properties: map[string]apiextv1.JSONSchemaProps{
+									"name": {
+										Type: "string",
+									},
+									"size": {
+										Type:        "string",
+										Description: "Value must not be zero",
+										Pattern:     "^(\\d+(e\\d+)?|\\d+(\\.\\d+)?(e\\d+)?[EPTGMK]i?)$",
+									},
+									"storageClass": {
+										Type: "string",
+									},
+									"mountPath": {
+										Type: "string",
+									},
+									"subPath": {
+										Type: "string",
+									},
+									"targetContainers": {
+										Type: "array",
+										Items: &apiextv1.JSONSchemaPropsOrArray{
+											Schema: &apiextv1.JSONSchemaProps{
+												Type: "string",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
 					"additionalVolumes": {
 						Type: "array",
 						Items: &apiextv1.JSONSchemaPropsOrArray{
