@@ -66,6 +66,11 @@ spec:
 #      matchLabels:
 #        environment: dev
 #        service: postgres
+#  additionalVolumeClaimTemplates:
+#    - mountPath: /home/postgres/extra-tablespace
+#      name: extra-tablespace
+#      size: 1Gi
+#      storageClass: my-sc
   additionalVolumes:
     - name: empty
       mountPath: /opt/empty
