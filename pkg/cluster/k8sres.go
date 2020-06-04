@@ -788,6 +788,7 @@ func (c *Cluster) generatePodTemplate(
 	additionalSecretMount string,
 	additionalSecretMountPath string,
 	additionalVolumes []acidv1.AdditionalVolume,
+	additionalVolumeClaimTemplates []acidv1.AdditionalVolumeClaimTemplate,
 ) (*v1.PodTemplateSpec, error) {
 
 	terminateGracePeriodSeconds := terminateGracePeriod
@@ -850,6 +851,10 @@ func (c *Cluster) generatePodTemplate(
 
 	if additionalVolumes != nil {
 		c.addAdditionalVolumes(&podSpec, additionalVolumes)
+	}
+
+	if additionalVolumeClaimTemplates != nil {
+		c.addAdditionalVolumeClaimTemplateMounts(&podSpec, additionalVolumeClaimTemplates)
 	}
 
 	template := v1.PodTemplateSpec{
@@ -1210,12 +1215,12 @@ func generateSpiloReadinessProbe() *v1.Probe {
 func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.StatefulSet, error) {
 
 	var (
-		err                 error
-		initContainers      []v1.Container
-		sidecarContainers   []v1.Container
-		podTemplate         *v1.PodTemplateSpec
-		volumeClaimTemplate *v1.PersistentVolumeClaim
-		additionalVolumes   = spec.AdditionalVolumes
+		err                  error
+		initContainers       []v1.Container
+		sidecarContainers    []v1.Container
+		podTemplate          *v1.PodTemplateSpec
+		volumeClaimTemplates = []v1.PersistentVolumeClaim{}
+		additionalVolumes    = spec.AdditionalVolumes
 	)
 
 	defaultResources := makeDefaultResources(&c.OpConfig)
@@ -1412,15 +1417,25 @@ func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.Statef
 		c.OpConfig.PodAntiAffinityPreferredDuringScheduling,
 		c.OpConfig.AdditionalSecretMount,
 		c.OpConfig.AdditionalSecretMountPath,
-		additionalVolumes)
+		additionalVolumes,
+		spec.AdditionalVolumeClaimTemplates,
+	)
 
 	if err != nil {
 		return nil, fmt.Errorf("could not generate pod template: %v", err)
 	}
 
-	if volumeClaimTemplate, err = c.generatePersistentVolumeClaimTemplate(spec.Volume.Size,
-		spec.Volume.StorageClass, spec.Volume.Selector); err != nil {
+	volumeClaimTemplate, err := c.generatePersistentVolumeClaimTemplate(constants.DataVolumeName, spec.Volume.Size,
+		spec.Volume.StorageClass, spec.Volume.Selector)
+
+	if err != nil {
 		return nil, fmt.Errorf("could not generate volume claim template: %v", err)
+	}
+	volumeClaimTemplates = append(volumeClaimTemplates, *volumeClaimTemplate)
+
+	volumeClaimTemplates, err = c.generateAdditionalPersistentVolumeClaimTemplates(spec.AdditionalVolumeClaimTemplates, volumeClaimTemplates)
+	if err != nil {
+		return nil, fmt.Errorf("could not generate additional volume claim templates: %v", err)
 	}
 
 	// global minInstances and maxInstances settings can overwrite manifest
@@ -1452,7 +1467,7 @@ func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.Statef
 			Selector:             c.labelsSelector(),
 			ServiceName:          c.serviceName(Master),
 			Template:             *podTemplate,
-			VolumeClaimTemplates: []v1.PersistentVolumeClaim{*volumeClaimTemplate},
+			VolumeClaimTemplates: volumeClaimTemplates,
 			UpdateStrategy:       updateStrategy,
 			PodManagementPolicy:  podManagementPolicy,
 		},
@@ -1751,10 +1766,64 @@ func (c *Cluster) addAdditionalVolumes(podSpec *v1.PodSpec,
 	podSpec.Volumes = volumes
 }
 
-func (c *Cluster) generatePersistentVolumeClaimTemplate(volumeSize, volumeStorageClass string,
+func (c *Cluster) addAdditionalVolumeClaimTemplateMounts(podSpec *v1.PodSpec,
+	additionalVolumes []acidv1.AdditionalVolumeClaimTemplate) {
+
+	mountPaths := map[string]acidv1.AdditionalVolumeClaimTemplate{}
+	for i, v := range additionalVolumes {
+		if previousVolume, exist := mountPaths[v.MountPath]; exist {
+			msg := "Volume %+v cannot be mounted to the same path as %+v"
+			c.logger.Warningf(msg, v, previousVolume)
+			continue
+		}
+
+		if v.MountPath == constants.PostgresDataMount {
+			msg := "Cannot mount volume on postgresql data directory, %+v"
+			c.logger.Warningf(msg, v)
+			continue
+		}
+
+		if v.TargetContainers == nil {
+			spiloContainer := podSpec.Containers[0]
+			additionalVolumes[i].TargetContainers = []string{spiloContainer.Name}
+		}
+
+		for _, target := range v.TargetContainers {
+			if target == "all" && len(v.TargetContainers) != 1 {
+				msg := `Target containers could be either "all" or a list
+						of containers, mixing those is not allowed, %+v`
+				c.logger.Warningf(msg, v)
+				continue
+			}
+		}
+
+		mountPaths[v.MountPath] = v
+	}
+
+	c.logger.Infof("Mount additional volumes: %+v", additionalVolumes)
+
+	for i := range podSpec.Containers {
+		mounts := podSpec.Containers[i].VolumeMounts
+		for _, v := range additionalVolumes {
+			for _, target := range v.TargetContainers {
+				if podSpec.Containers[i].Name == target || target == "all" {
+					mounts = append(mounts, v1.VolumeMount{
+						Name:      v.Name,
+						MountPath: v.MountPath,
+						SubPath:   v.SubPath,
+					})
+				}
+			}
+		}
+		podSpec.Containers[i].VolumeMounts = mounts
+	}
+}
+
+func (c *Cluster) generatePersistentVolumeClaimTemplate(name, volumeSize, volumeStorageClass string,
 	volumeSelector *metav1.LabelSelector) (*v1.PersistentVolumeClaim, error) {
 
 	var storageClassName *string
+
 	if volumeStorageClass != "" {
 		storageClassName = &volumeStorageClass
 	}
@@ -1767,7 +1836,7 @@ func (c *Cluster) generatePersistentVolumeClaimTemplate(volumeSize, volumeStorag
 	volumeMode := v1.PersistentVolumeFilesystem
 	volumeClaim := &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        constants.DataVolumeName,
+			Name:        name,
 			Annotations: c.annotationsSet(nil),
 			Labels:      c.labelsSet(true),
 		},
@@ -1785,6 +1854,30 @@ func (c *Cluster) generatePersistentVolumeClaimTemplate(volumeSize, volumeStorag
 	}
 
 	return volumeClaim, nil
+}
+
+func (c *Cluster) generateAdditionalPersistentVolumeClaimTemplates(additionalTemplates []acidv1.AdditionalVolumeClaimTemplate, templates []v1.PersistentVolumeClaim) ([]v1.PersistentVolumeClaim, error) {
+	for _, additionalTemplate := range additionalTemplates {
+		for _, t := range templates {
+			if additionalTemplate.Name == t.Name {
+				return nil, fmt.Errorf("persistent volume claim %+v cannot be created with the same name as %+v", additionalTemplate, t)
+			}
+		}
+
+		template, err := c.generatePersistentVolumeClaimTemplate(
+			additionalTemplate.Name,
+			additionalTemplate.Size,
+			additionalTemplate.StorageClass,
+			nil,            /* No selectors on additional volumeClaimTemplates */
+		)
+		if err != nil {
+			return nil, fmt.Errorf("persistent volume claim %+v could not be created: %v", additionalTemplate, err)
+		}
+
+		templates = append(templates, *template)
+	}
+
+	return templates, nil
 }
 
 func (c *Cluster) generateUserSecrets() map[string]*v1.Secret {
@@ -2219,7 +2312,9 @@ func (c *Cluster) generateLogicalBackupJob() (*batchv1.CronJob, error) {
 		false,
 		c.OpConfig.AdditionalSecretMount,
 		c.OpConfig.AdditionalSecretMountPath,
-		[]acidv1.AdditionalVolume{}); err != nil {
+		[]acidv1.AdditionalVolume{},
+		[]acidv1.AdditionalVolumeClaimTemplate{},
+	); err != nil {
 		return nil, fmt.Errorf("could not generate pod template for logical backup pod: %v", err)
 	}
 

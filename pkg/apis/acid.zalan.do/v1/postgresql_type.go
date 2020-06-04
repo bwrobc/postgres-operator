@@ -139,11 +139,12 @@ type Volume struct {
 
 // AdditionalVolumeClaimTemplate describes a additional volume claim template
 type AdditionalVolumeClaimTemplate struct {
-	Name         string `json:"name"`
-	Size         string `json:"size"`
-	StorageClass string `json:"storageClass"`
-	MountPath    string `json:"mountPath"`
-	SubPath      string `json:"subPath,omitempty"`
+	Name             string   `json:"name"`
+	Size             string   `json:"size"`
+	StorageClass     string   `json:"storageClass"`
+	MountPath        string   `json:"mountPath"`
+	SubPath          string   `json:"subPath,omitempty"`
+	TargetContainers []string `json:"targetContainers"`
 }
 
 // AdditionalVolume specs additional optional volumes for statefulset
